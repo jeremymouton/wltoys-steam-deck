@@ -1,0 +1,17 @@
+# claude-autodev / local workflow scaffolding (not part of the app)
+.autodev/
+.claude/
+.mcp.json
+CLAUDE.md
+CLAUDE-TODO.md
+docs/
+.playwright/
+.playwright-mcp/
+
+# python artifacts
+__pycache__/
+*.pyc
+
+# node / os
+node_modules/
+.DS_Store
