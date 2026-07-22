@@ -1,0 +1,3 @@
+# keep dev-only tools out of release archives (GitHub "Source code (zip)")
+probe.mjs  export-ignore
+PROBE.md   export-ignore
