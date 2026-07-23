@@ -1,0 +1,260 @@
+# Builds the portable SLAM sidecar bundle for the Steam Deck (SteamOS x86_64).
+#
+# ubuntu-22.04 = glibc 2.35, older than SteamOS >=3.5's 2.37 — the binaries are
+# forward-compatible with every Deck that can run the driver. Recipe per
+# docs/research/stella-vslam-deck-deployment.md Q1: minimal OpenCV (BUILD_LIST),
+# g2o at the stella-docs-pinned tag, the stella-cv FBoW fork, stella_vslam at
+# the exact commit the Mac feasibility run verified, then an AppDir-style
+# $ORIGIN-rpath lib bundle (glibc family excluded, everything else shipped).
+#
+# The artifact is attached to releases BY HAND, like ffmpeg-linux-x64.tar.xz:
+#   gh run download <run-id> -n slam-linux-x64
+#   gh release upload vX.Y.Z slam-linux-x64.tar.xz
+# install.sh / update.sh fetch it from the release when present; a release
+# without it just means the minimap is off.
+
+name: slam-bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/slam-bundle] # iteration branch — every push rebuilds
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bundle:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      OPENCV_VER: 4.10.0
+      G2O_REF: e8df2004e07ea8f5b8e6a8b9f2dc067b45b45036 # tag 20230223_git (stella install docs pin)
+      FBOW_REF: c6e3c29e3332a0b0834021797e2aa4e8eb66a3c1 # stella-cv/FBoW (matches the Mac feasibility build)
+      STELLA_REF: 8ac1be4d1fa20e4148b478d7b30788abcbb1d9fe # 0.6.0-9-g8ac1be4 (matches the Mac feasibility build)
+      VOCAB_REF: 708407ae4cd59219b996eda7ed1f4562c7ae106a # stella-cv/FBoW_orb_vocab pin
+      VOCAB_SHA256: 310cdf3581b5dd5becfabd75823606e315b1f049f70e51fa23be05021dc4b107
+      OCV_PREFIX: ${{ github.workspace }}/prefix-opencv # cached separately (slowest leg)
+      PREFIX: ${{ github.workspace }}/prefix # g2o + FBoW + stella scratch install
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: apt build deps
+        run: |
+          sudo apt-get update
+          # GL dev packages: g2o's installed g2oConfig.cmake does an
+          # unconditional find_dependency(OpenGL) even with G2O_USE_OPENGL=OFF;
+          # build-time only, nothing links GL (the smoke test proves it)
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git ca-certificates curl xz-utils patchelf \
+            libeigen3-dev libyaml-cpp-dev libsqlite3-dev libsuitesparse-dev \
+            libgl-dev libglx-dev libopengl-dev
+          # stella needs Eigen >= 3.3; jammy ships 3.4.0
+          dpkg -s libeigen3-dev | grep '^Version'
+
+      - name: cache minimal OpenCV
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OCV_PREFIX }}
+          key: opencv-${{ env.OPENCV_VER }}-minimal-jammy-v2
+
+      - name: build minimal OpenCV
+        run: |
+          if [ -f "$OCV_PREFIX/lib/libopencv_core.so" ]; then
+            echo "cache hit — skipping OpenCV build"
+            exit 0
+          fi
+          curl -fsSL "https://github.com/opencv/opencv/archive/refs/tags/$OPENCV_VER.tar.gz" | tar -xz
+          # BUILD_LIST per research, plus videoio+highgui: stella's top-level
+          # find_package(OpenCV COMPONENTS ...) demands them even though only
+          # its examples (not built) use them — with every backend off they are
+          # tiny stubs and nothing links them, so they stay out of the bundle.
+          # Image codecs are built from OpenCV's bundled sources
+          # (BUILD_ZLIB/PNG/JPEG=ON) so the bundle doesn't grow system
+          # libpng/libjpeg deps.
+          cmake -S "opencv-$OPENCV_VER" -B build-opencv \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$OCV_PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_LIST=core,imgproc,features2d,calib3d,flann,imgcodecs,videoio,highgui \
+            -DWITH_GTK=OFF -DWITH_FFMPEG=OFF -DWITH_V4L=OFF -DWITH_GSTREAMER=OFF \
+            -DWITH_IPP=OFF -DWITH_OPENCL=OFF -DWITH_ITT=OFF -DWITH_PROTOBUF=OFF \
+            -DWITH_TIFF=OFF -DWITH_WEBP=OFF -DWITH_OPENJPEG=OFF -DWITH_JASPER=OFF \
+            -DWITH_OPENEXR=OFF \
+            -DBUILD_ZLIB=ON -DBUILD_PNG=ON -DBUILD_JPEG=ON \
+            -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+            -DBUILD_opencv_apps=OFF
+          cmake --build build-opencv -j"$(nproc)"
+          cmake --install build-opencv
+
+      - name: build g2o (stella-pinned)
+        run: |
+          git clone https://github.com/RainerKuemmerle/g2o.git src-g2o
+          git -C src-g2o checkout "$G2O_REF"
+          # flags = stella install docs / the Mac feasibility build
+          cmake -S src-g2o -B build-g2o \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_UNITTESTS=OFF \
+            -DBUILD_WITH_MARCH_NATIVE=OFF \
+            -DG2O_USE_CHOLMOD=OFF \
+            -DG2O_USE_CSPARSE=ON \
+            -DG2O_USE_OPENGL=OFF \
+            -DG2O_USE_OPENMP=OFF \
+            -DG2O_BUILD_APPS=OFF \
+            -DG2O_BUILD_EXAMPLES=OFF
+          cmake --build build-g2o -j"$(nproc)"
+          cmake --install build-g2o
+
+      - name: build FBoW (stella-cv fork)
+        run: |
+          git clone https://github.com/stella-cv/FBoW.git src-fbow
+          git -C src-fbow checkout "$FBOW_REF"
+          # the fbow lib target links opencv_highgui but uses zero symbols from
+          # it (only utils/ needs GUI, and BUILD_UTILS=OFF) — minimal OpenCV has
+          # no highgui, so drop the dead link line
+          sed -i '/opencv_highgui/d' src-fbow/CMakeLists.txt
+          cmake -S src-fbow -B build-fbow \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DCMAKE_PREFIX_PATH="$OCV_PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_UTILS=OFF
+          cmake --build build-fbow -j"$(nproc)"
+          cmake --install build-fbow
+
+      - name: build stella_vslam (Mac-parity commit)
+        run: |
+          git clone --recursive https://github.com/stella-cv/stella_vslam.git src-stella
+          git -C src-stella checkout "$STELLA_REF"
+          git -C src-stella submodule update --init --recursive
+          # spdlog + json are vendored in 3rd/ (no libspdlog-dev installed on
+          # purpose — same vendored 1.3.1 the Mac build used). Flags mirror the
+          # Mac feasibility build; aruco off (minimal OpenCV has none anyway).
+          cmake -S src-stella -B build-stella \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DCMAKE_PREFIX_PATH="$PREFIX;$OCV_PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_WITH_MARCH_NATIVE=OFF \
+            -DUSE_ARUCO=OFF \
+            -DUSE_STACK_TRACE_LOGGER=OFF \
+            -DUSE_SSE_ORB=OFF \
+            -DUSE_SSE_FP_MATH=OFF \
+            -DUSE_SANITIZER=OFF
+          cmake --build build-stella -j"$(nproc)"
+          cmake --install build-stella
+
+      - name: build slam_pipe
+        run: |
+          cmake -S slam -B build-slam-pipe \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$PREFIX;$OCV_PREFIX"
+          cmake --build build-slam-pipe -j"$(nproc)"
+
+      - name: fetch ORB vocabulary
+        run: |
+          curl -fsSL -o orb_vocab.fbow \
+            "https://raw.githubusercontent.com/stella-cv/FBoW_orb_vocab/$VOCAB_REF/orb_vocab.fbow"
+          echo "$VOCAB_SHA256  orb_vocab.fbow" | sha256sum -c
+
+      - name: assemble bundle ($ORIGIN rpaths)
+        run: |
+          mkdir -p bundle/slam/lib
+          cp build-slam-pipe/slam_pipe bundle/slam/
+          cp slam/wltoys_slam.yaml bundle/slam/
+          cp orb_vocab.fbow bundle/slam/
+          LD_LIBRARY_PATH="$PREFIX/lib:$OCV_PREFIX/lib" ldd build-slam-pipe/slam_pipe | tee ldd.txt
+          if grep -F 'not found' ldd.txt; then
+            echo '::error::unresolved libraries at bundle time'
+            exit 1
+          fi
+          # ship every dep EXCEPT the glibc family (libc/libm/libdl/libpthread/
+          # librt/ld-linux/libresolv) — those must come from the host. libstdc++,
+          # libgcc_s, libgomp, libsqlite3, yaml-cpp, cxsparse, opencv, g2o, fbow,
+          # stella all ride along. cp -L flattens symlinks to SONAME-named files.
+          while read -r p; do
+            case "$(basename "$p")" in
+              libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libresolv.so.*|ld-linux*) continue ;;
+            esac
+            cp -L "$p" bundle/slam/lib/
+          done < <(awk '$2 == "=>" {print $3}' ldd.txt)
+          # shellcheck disable=SC2016 # literal $ORIGIN — resolved by the loader
+          patchelf --set-rpath '$ORIGIN/lib' bundle/slam/slam_pipe
+          for so in bundle/slam/lib/*; do
+            # shellcheck disable=SC2016
+            patchelf --set-rpath '$ORIGIN' "$so"
+          done
+          ls -la bundle/slam bundle/slam/lib
+
+      - name: smoke test (bundle must be self-contained)
+        run: |
+          # hide the build prefixes so nothing can resolve from them
+          mv "$PREFIX" "$PREFIX-hidden"
+          mv "$OCV_PREFIX" "$OCV_PREFIX-hidden"
+          cd bundle/slam
+          ldd ./slam_pipe
+          if ldd ./slam_pipe | grep -F 'not found'; then
+            echo '::error::loader cannot resolve all libs from the bundle'
+            exit 1
+          fi
+          # every non-glibc dep must resolve INSIDE the bundle (a system-path
+          # resolution would pass here but fail on the Deck)
+          bad=0
+          while read -r name path; do
+            case "$name" in
+              libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libresolv.so.*) continue ;;
+            esac
+            case "$path" in # $ORIGIN of ./slam_pipe yields a "/./" segment
+              "$PWD"/lib/*|"$PWD"/./lib/*) ;;
+              *) echo "::error::$name resolved outside the bundle: $path"; bad=1 ;;
+            esac
+          done < <(ldd ./slam_pipe | awk '$2 == "=>" {print $1, $3}')
+          [ "$bad" -eq 0 ]
+          # no-args run must reach main() and print usage + exit 2 — proves the
+          # loader actually mapped every lib (constructors run before main)
+          set +e
+          out="$(env -i ./slam_pipe 2>&1)"
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          echo "$out"
+          [ "$rc" -eq 2 ]
+          echo "$out" | grep -q 'usage:'
+          cd ../..
+          # restore the cached prefix so the cache post-step can save it
+          mv "$OCV_PREFIX-hidden" "$OCV_PREFIX"
+
+      - name: pack slam-linux-x64.tar.xz
+        run: |
+          XZ_OPT='-9 -T0' tar -C bundle -cJf slam-linux-x64.tar.xz slam
+          ls -la slam-linux-x64.tar.xz
+          tar -tvJf slam-linux-x64.tar.xz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slam-linux-x64
+          path: slam-linux-x64.tar.xz
+          if-no-files-found: error
+
+      - name: summary
+        run: |
+          {
+            echo '## slam-linux-x64.tar.xz'
+            echo
+            echo '```'
+            tar -tvJf slam-linux-x64.tar.xz
+            echo '```'
+            echo
+            echo 'Attach to a release (install.sh/update.sh then pick it up):'
+            echo
+            echo '```'
+            echo 'gh run download ${{ github.run_id }} -n slam-linux-x64'
+            echo 'gh release upload vX.Y.Z slam-linux-x64.tar.xz'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

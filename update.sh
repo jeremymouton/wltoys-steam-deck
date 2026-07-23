@@ -29,6 +29,21 @@ main() {
 
   echo "Installing into ${HERE}…"
   tar -xzf "$tmp/src.tgz" --strip-components=1 -C "$HERE"
+
+  # SLAM bundle (live minimap) — optional release asset, same flow as the
+  # ffmpeg one: missing just means the feature is off, not an error.
+  if curl -fsSL "https://github.com/$REPO/releases/download/$tag/slam-linux-x64.tar.xz" \
+      -o "$tmp/slam.tar.xz" 2>/dev/null; then
+    # unpacks as slam/ over the app dir: slam_pipe + lib/ + orb_vocab.fbow + yaml
+    if tar -xJf "$tmp/slam.tar.xz" -C "$HERE"; then
+      echo "SLAM bundle installed → slam/slam_pipe (live minimap enabled)."
+    else
+      echo "WARNING: SLAM bundle extract failed — minimap disabled (driving is unaffected)."
+    fi
+  else
+    echo "SLAM bundle not found in release — minimap disabled."
+  fi
+
   echo "Done — now on $tag."
   exit 0
 }
