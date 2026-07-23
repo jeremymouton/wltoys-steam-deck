@@ -53,7 +53,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.OCV_PREFIX }}
-          key: opencv-${{ env.OPENCV_VER }}-minimal-jammy-v1
+          key: opencv-${{ env.OPENCV_VER }}-minimal-jammy-v2
 
       - name: build minimal OpenCV
         run: |
@@ -62,14 +62,18 @@ jobs:
             exit 0
           fi
           curl -fsSL "https://github.com/opencv/opencv/archive/refs/tags/$OPENCV_VER.tar.gz" | tar -xz
-          # BUILD_LIST per research: just what stella links. Image codecs are
-          # built from OpenCV's bundled sources (BUILD_ZLIB/PNG/JPEG=ON) so the
-          # bundle doesn't grow system libpng/libjpeg deps.
+          # BUILD_LIST per research, plus videoio+highgui: stella's top-level
+          # find_package(OpenCV COMPONENTS ...) demands them even though only
+          # its examples (not built) use them — with every backend off they are
+          # tiny stubs and nothing links them, so they stay out of the bundle.
+          # Image codecs are built from OpenCV's bundled sources
+          # (BUILD_ZLIB/PNG/JPEG=ON) so the bundle doesn't grow system
+          # libpng/libjpeg deps.
           cmake -S "opencv-$OPENCV_VER" -B build-opencv \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$OCV_PREFIX" \
             -DBUILD_SHARED_LIBS=ON \
-            -DBUILD_LIST=core,imgproc,features2d,calib3d,flann,imgcodecs \
+            -DBUILD_LIST=core,imgproc,features2d,calib3d,flann,imgcodecs,videoio,highgui \
             -DWITH_GTK=OFF -DWITH_FFMPEG=OFF -DWITH_V4L=OFF -DWITH_GSTREAMER=OFF \
             -DWITH_IPP=OFF -DWITH_OPENCL=OFF -DWITH_ITT=OFF -DWITH_PROTOBUF=OFF \
             -DWITH_TIFF=OFF -DWITH_WEBP=OFF -DWITH_OPENJPEG=OFF -DWITH_JASPER=OFF \
