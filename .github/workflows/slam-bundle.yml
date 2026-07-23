@@ -104,6 +104,10 @@ jobs:
         run: |
           git clone https://github.com/stella-cv/FBoW.git src-fbow
           git -C src-fbow checkout "$FBOW_REF"
+          # the fbow lib target links opencv_highgui but uses zero symbols from
+          # it (only utils/ needs GUI, and BUILD_UTILS=OFF) — minimal OpenCV has
+          # no highgui, so drop the dead link line
+          sed -i '/opencv_highgui/d' src-fbow/CMakeLists.txt
           cmake -S src-fbow -B build-fbow \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
