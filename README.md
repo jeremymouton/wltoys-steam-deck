@@ -45,7 +45,12 @@ All setup is done in **Desktop Mode** (hold **STEAM → Power → Switch to Desk
 | left trigger / B | reverse |
 | D-pad left/right | steering trim (persists) |
 | Y | start / stop recording |
+| View | show / hide the live minimap |
+| RB | mapping mode (throttle capped at 60%) |
 | exit game | stop |
+
+The minimap buttons only do something when the SLAM bundle is installed — see
+[Live minimap](#live-minimap-experimental).
 
 ## Recording
 
@@ -53,6 +58,28 @@ Press **Y** to toggle recording; the OSD shows a blinking red **● REC** with t
 elapsed time. Clips save to
 `~/Videos/wltoys-<timestamp>.h265` (raw HEVC — plays in mpv/VLC; `ffmpeg -i clip.h265
 -c copy clip.mp4` to remux). UDP video mode only (the default).
+
+## Live minimap (experimental)
+
+When the SLAM sidecar is present (`slam/slam_pipe` from the release bundle, or a
+local `slam/build-mac.sh` build during development) and video is the default UDP
+mode, driving runs sparse visual SLAM on the camera feed and overlays a live
+top-down minimap in the corner: blue dots = wall/furniture landmarks, green =
+the mapped route, white = this session's driven path, orange triangle = the car.
+The caption under it shows the tracking state (`MAP TRACKING 25FPS` /
+`LOST` / `INIT`).
+
+- **View** shows/hides the minimap. **RB** toggles *mapping mode*, which caps
+  throttle at 60% — drive slow smooth laps to build a clean map.
+- The map persists in `~/wltoys-runtime/map.msg`: it's saved on exit, reloaded
+  on the next run, and the car re-localizes into it when it re-sees mapped area
+  (tracking losses don't wipe it).
+- SLAM runs as a separate low-priority process — if it crashes the minimap
+  disappears and driving is unaffected. No scale/north: the map is relative to
+  where mapping started.
+- Preview it on any machine without the car:
+  `SLAM_DEMO_CLIP=recording.h265 ./run.sh --hud-demo` plays a recorded clip and
+  maps it through the identical pipeline.
 
 ## Updating
 
@@ -88,6 +115,12 @@ shortcut, trim setting, and runtime stay put.
 | `RT_AXIS` / `LT_AXIS` | `5` / `2` | trigger axes (forward / reverse) |
 | `ACCEL_BUTTON` / `REVERSE_BUTTON` | `0` / `1` | A / B buttons (forward / reverse) |
 | `RECORD_BUTTON` | `3` | button to toggle recording (Y) |
+| `MINIMAP_BUTTON` | `6` | button to show/hide the minimap (View) |
+| `MAPPING_BUTTON` | `5` | button to toggle mapping mode (RB) |
+| `MAPPING_CAP` | `0.6` | mapping-mode throttle ceiling (0..1) |
+| `SLAM_BIN` | auto | slam_pipe binary (`slam/build/slam_pipe`, then `slam/slam_pipe`) |
+| `SLAM_MAP` | `~/wltoys-runtime/map.msg` | persistent SLAM map database |
+| `SLAM_DEMO_CLIP` | – | recorded `.h265` for the `--hud-demo` SLAM preview |
 | `THROTTLE_AXIS` | `1` | throttle axis (stick mode only) |
 | `STEER_EXPO` / `THROTTLE_EXPO` | `0.4` / `0.3` | softness near center (0 = linear) |
 | `TRIM_AXIS` / `TRIM_STEP` | `6` / `3` | D-pad axis + step for trim |
