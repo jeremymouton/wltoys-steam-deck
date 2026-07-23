@@ -51,6 +51,10 @@ CAM_PARAMS="628.3,640,360,-0.114"
 BRUSH_CACHE="$HOME/.cache/wltoys-slam/brush"
 BRUSH_BIN="$BRUSH_CACHE/brush_app"
 BRUSH_URL="https://github.com/ArthurBrussee/brush/releases/download/v0.3.0/brush-app-aarch64-apple-darwin.tar.xz"
+# sha256 of that exact release asset, pinned HERE (not fetched from the same
+# origin as the tarball — a same-origin .sha256 would be tampered with together
+# with the asset and only ever catches download corruption, not a swapped binary).
+BRUSH_SHA256="65b2631398c839be3c1d4d7160fe2326389dec87830aac0710985e6690a1048c"
 
 log()  { echo "[$(date +%H:%M:%S)] $*"; }
 skip() { log "$1 SKIP — $2"; }
@@ -187,7 +191,7 @@ fi
 # ---------------------------------------------------------------- 5. splat
 # Gaussian splat via Brush v0.3.0 (wgpu/Metal, headless when given a source
 # path). Binary auto-fetched once into ~/.cache/wltoys-slam/brush/,
-# sha256-verified against the published checksum, dequarantined.
+# sha256-verified against the checksum pinned in this script, dequarantined.
 ensure_brush() {
   if [ -x "$BRUSH_BIN" ]; then return 0; fi
   # Apple Silicon check: uname -m lies under Rosetta; hw.optional.arm64 doesn't.
@@ -199,13 +203,11 @@ ensure_brush() {
   mkdir -p "$BRUSH_CACHE"
   local tarball="$BRUSH_CACHE/brush-app-aarch64-apple-darwin.tar.xz"
   curl -fsSL --retry 3 -o "$tarball" "$BRUSH_URL" || { log "splat: download failed"; return 1; }
-  curl -fsSL --retry 3 -o "$tarball.sha256" "$BRUSH_URL.sha256" || { log "splat: checksum download failed"; return 1; }
-  local expect actual
-  expect=$(awk '{print $1}' "$tarball.sha256")
+  local actual
   actual=$(shasum -a 256 "$tarball" | awk '{print $1}')
-  if [ -z "$expect" ] || [ "$expect" != "$actual" ]; then
+  if [ "$actual" != "$BRUSH_SHA256" ]; then
     rm -f "$tarball"
-    log "splat: sha256 MISMATCH (expected $expect, got $actual) — refusing to run the binary"
+    log "splat: sha256 MISMATCH (expected $BRUSH_SHA256, got $actual) — refusing to run the binary"
     return 1
   fi
   log "splat: sha256 verified ($actual)"

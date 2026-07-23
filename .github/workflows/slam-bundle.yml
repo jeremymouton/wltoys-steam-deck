@@ -15,6 +15,11 @@
 
 name: slam-bundle
 
+# least privilege: nothing here writes to the repo — the artifact is attached
+# to releases by hand (see above), so the job token only needs checkout.
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
   push:

@@ -84,7 +84,11 @@ function wifiPowerSaveOff() {
     const r = spawnSync("sh", ["-c", 'for d in /sys/class/net/*/wireless; do basename "$(dirname "$d")"; done 2>/dev/null'], { encoding: "utf8" });
     iface = (r.stdout || "").trim().split("\n")[0] || "wlan0";
   }
-  const r = spawnSync("sh", ["-c", `iw dev ${iface} set power_save off 2>/dev/null || sudo -n iw dev ${iface} set power_save off 2>/dev/null`]);
+  // iface rides in as a positional arg (not interpolated into the shell string)
+  // so an odd WIFI_IFACE value can't grow into a shell command.
+  const r = spawnSync("sh", ["-c",
+    'iw dev "$1" set power_save off 2>/dev/null || sudo -n iw dev "$1" set power_save off 2>/dev/null',
+    "sh", iface]);
   console.error(r.status === 0
     ? `[wifi] power_save off on ${iface} (lower jitter)`
     : `[wifi] couldn't disable power_save on ${iface} — optional: sudo iw dev ${iface} set power_save off`);
@@ -456,7 +460,7 @@ function slamLine(line) {
   let m;
   try { m = JSON.parse(line); } catch { return; } // tolerate torn/garbled lines
   slam.lines++;
-  if (typeof m.state === "string") slam.state = m.state;
+  if (typeof m.state === "string") slam.state = m.state.slice(0, 32); // cap: state feeds the HUD ASS file
   if (finiteArr(m.pose) && m.pose.length === 12) { // row-major 3x4 world<-cam
     slam.pose = m.pose;
     const x = m.pose[3], z = m.pose[11]; // camera position = translation column
