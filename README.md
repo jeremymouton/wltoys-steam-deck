@@ -24,6 +24,46 @@ All setup is done in **Desktop Mode** (hold **STEAM → Power → Switch to Desk
    *(Optional: rename it and set Controller → a Gamepad layout in its Properties.)*
 6. **Switch back to Game Mode** (STEAM → Power → **Switch to Game Mode**).
 
+## Install (Mac)
+
+The same repo runs on an Apple-Silicon Mac (arm64) — handy for testing the live
+minimap with more compute than the Deck. The scripts auto-detect the platform
+(`macos-arm64` vs `linux-x64`) off the **same release tag**, so there's nothing
+extra to download.
+
+1. **Players are a prerequisite** (not bundled on Mac — the Deck ships a static
+   ffmpeg, the Mac uses Homebrew):
+   ```bash
+   brew install mpv ffmpeg
+   ```
+2. **Get the code** — download the **Source code (zip)** from the
+   [latest release](https://github.com/jeremymouton/wltoys-steam-deck/releases/latest)
+   and unzip it (or `git clone`).
+3. **Run setup** on WiFi with internet:
+   ```bash
+   bash install.sh
+   ```
+   This fetches the portable `darwin-arm64` Node, checks that `mpv`/`ffmpeg` are
+   on PATH, and — when they're published to the release — pulls the
+   `slam-macos-arm64` bundle and the `gamepad-helper-macos-arm64` binary
+   (quarantine stripped automatically). Any missing optional asset is non-fatal:
+   the minimap or the gamepad helper just stays off.
+4. **Drive:**
+   ```bash
+   ./run.sh            # video + control
+   ./run.sh --list     # find which stick axis is which
+   ./run.sh --hud-demo # preview the OSD, no car needed
+   ```
+   No controller? **WASD / arrow keys** steer (see [Controls](#controls)).
+
+> **Homebrew on PATH:** Apple-Silicon brew lives in `/opt/homebrew/bin`. If
+> `run.sh` warns that mpv/ffmpeg are missing even though you installed them, your
+> shell doesn't have that dir on PATH — open a normal Terminal, or add it.
+
+`bash update.sh` works the same on both platforms: it resolves the latest tag and
+pulls the assets for whichever OS you're on. macOS **x86_64** (Intel) is detected
+honestly but unsupported — no assets are built for it.
+
 ## Drive (Game Mode)
 
 1. Turn the car on, physical remote **OFF**, wait for the camera's green light.
@@ -51,6 +91,26 @@ All setup is done in **Desktop Mode** (hold **STEAM → Power → Switch to Desk
 
 The minimap buttons only do something when the SLAM bundle is installed — see
 [Live minimap](#live-minimap-experimental).
+
+## Drive from a Mac (dev)
+
+`drive.mjs` also runs on macOS (arm64) — handy for testing the live minimap with
+more compute than the Deck. Video, HUD and the SLAM minimap are identical; the one
+Mac-specific piece is gamepad input (macOS has no `/dev/input/jsN`).
+
+1. **Build the controller helper** (needs the Xcode Command Line Tools —
+   `xcode-select --install`):
+   ```bash
+   bash gamepad/build-mac.sh
+   ```
+   This compiles a small Swift GameController helper (`gamepad/gamepad_mac`) that
+   feeds the same 8-byte events into `drive.mjs`. It uses Apple's GameController
+   framework, so there's **no "Input Monitoring" prompt**.
+2. **Connect a controller** — Xbox Wireless, DualSense / DualShock 4, Switch Pro or
+   an MFi pad, over Bluetooth or USB (macOS Catalina+ supports these natively).
+3. **Check the mapping** with `node drive.mjs --list`, then drive with
+   `node drive.mjs`. The stick / trigger / D-pad / button layout matches the
+   [Controls](#controls) table above.
 
 ## Recording
 
