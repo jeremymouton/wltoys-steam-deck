@@ -1,0 +1,267 @@
+# Builds the portable SLAM sidecar bundle for Apple-Silicon Macs (arm64).
+#
+# The macOS analogue of slam-bundle.yml. macos-14 is a native arm64 runner (free
+# for public repos). Same recipe as the Linux job — minimal OpenCV from source,
+# g2o/FBoW/stella at the same pinned commits — but the Mach-O relocation is done
+# by slam/relocate.sh (install_name_tool + @rpath/@loader_path + ad-hoc codesign)
+# instead of patchelf/$ORIGIN. Eigen is pinned to 3.4.0 from source: brew's eigen
+# is now 5.x, whose API breaks the stella 8ac1be4 build. OpenCV is built from
+# source (NOT brew opencv@4 at runtime) so the bundle has no brew dependency.
+#
+# The artifact is attached to releases BY HAND, like slam-linux-x64.tar.xz:
+#   gh run download <run-id> -n slam-macos-arm64
+#   gh release upload vX.Y.Z slam-macos-arm64.tar.xz
+# install.sh / update.sh fetch it per-platform when present; absent = minimap off.
+#
+# The LOCAL, offline-guaranteed path is slam/package-mac.sh (relocates an already
+# built slam/build/slam_pipe). This CI job produces the LEAN artifact; both share
+# the exact same slam/relocate.sh engine.
+
+name: slam-bundle-mac
+
+# least privilege: nothing here writes to the repo — the artifact is attached to
+# releases by hand (see above), so the job token only needs checkout.
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/slam-bundle-mac] # iteration branch — every push rebuilds
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bundle-mac:
+    runs-on: macos-14 # arm64 Apple Silicon, free for public repos
+    timeout-minutes: 120
+    env:
+      OPENCV_VER: 4.10.0
+      EIGEN_VER: 3.4.0
+      G2O_REF: e8df2004e07ea8f5b8e6a8b9f2dc067b45b45036 # tag 20230223_git (stella install docs pin)
+      FBOW_REF: c6e3c29e3332a0b0834021797e2aa4e8eb66a3c1 # stella-cv/FBoW (Mac-parity build)
+      STELLA_REF: 8ac1be4d1fa20e4148b478d7b30788abcbb1d9fe # 0.6.0-9-g8ac1be4 (Mac-parity build)
+      VOCAB_REF: 708407ae4cd59219b996eda7ed1f4562c7ae106a # stella-cv/FBoW_orb_vocab pin
+      VOCAB_SHA256: 310cdf3581b5dd5becfabd75823606e315b1f049f70e51fa23be05021dc4b107
+      OCV_PREFIX: ${{ github.workspace }}/prefix-opencv # cached separately (slowest leg)
+      PREFIX: ${{ github.workspace }}/prefix # eigen + g2o + FBoW + stella scratch install
+      LIBOMP: /opt/homebrew/opt/libomp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: brew build deps
+        run: |
+          # NOT eigen (brew is 5.x — too new for stella 8ac1be4; pinned 3.4.0 below).
+          # NOT opencv@4 at runtime — minimal OpenCV is built from source.
+          # sqlite3 comes from the system (/usr/lib); GL/Accelerate are frameworks.
+          brew install cmake yaml-cpp suite-sparse libomp
+          cmake --version
+
+      - name: pin Eigen 3.4.0 (header-only, fast) # stella 8ac1be4 needs Eigen 3.3-3.4
+        run: |
+          curl -fsSL "https://gitlab.com/libeigen/eigen/-/archive/$EIGEN_VER/eigen-$EIGEN_VER.tar.gz" | tar -xz
+          cmake -S "eigen-$EIGEN_VER" -B build-eigen -DCMAKE_INSTALL_PREFIX="$PREFIX"
+          cmake --install build-eigen
+
+      - name: cache minimal OpenCV
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OCV_PREFIX }}
+          key: opencv-${{ env.OPENCV_VER }}-minimal-mac14-v1
+
+      - name: build minimal OpenCV
+        run: |
+          if ls "$OCV_PREFIX"/lib/libopencv_core*.dylib >/dev/null 2>&1; then
+            echo "cache hit — skipping OpenCV build"
+            exit 0
+          fi
+          curl -fsSL "https://github.com/opencv/opencv/archive/refs/tags/$OPENCV_VER.tar.gz" | tar -xz
+          # Identical BUILD_LIST + WITH_* flags to slam-bundle.yml (videoio+highgui
+          # are stub components stella's find_package demands; nothing links them).
+          # Extra mac backends off (AVFoundation/OpenGL) so videoio/highgui don't
+          # pull system frameworks into the graph. Image codecs from bundled
+          # sources (BUILD_ZLIB/PNG/JPEG=ON) → no external libpng/libjpeg deps.
+          cmake -S "opencv-$OPENCV_VER" -B build-opencv \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX="$OCV_PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_LIST=core,imgproc,features2d,calib3d,flann,imgcodecs,videoio,highgui \
+            -DWITH_GTK=OFF -DWITH_FFMPEG=OFF -DWITH_V4L=OFF -DWITH_GSTREAMER=OFF \
+            -DWITH_AVFOUNDATION=OFF -DWITH_OPENGL=OFF -DWITH_QUARTZ=OFF \
+            -DWITH_IPP=OFF -DWITH_OPENCL=OFF -DWITH_ITT=OFF -DWITH_PROTOBUF=OFF \
+            -DWITH_TIFF=OFF -DWITH_WEBP=OFF -DWITH_OPENJPEG=OFF -DWITH_JASPER=OFF \
+            -DWITH_OPENEXR=OFF \
+            -DBUILD_ZLIB=ON -DBUILD_PNG=ON -DBUILD_JPEG=ON \
+            -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+            -DBUILD_opencv_apps=OFF
+          cmake --build build-opencv -j"$(sysctl -n hw.ncpu)"
+          cmake --install build-opencv
+
+      - name: build g2o (stella-pinned)
+        run: |
+          git clone https://github.com/RainerKuemmerle/g2o.git src-g2o
+          git -C src-g2o checkout "$G2O_REF"
+          # flags = stella install docs / the Mac feasibility build
+          cmake -S src-g2o -B build-g2o \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_UNITTESTS=OFF \
+            -DBUILD_WITH_MARCH_NATIVE=OFF \
+            -DG2O_USE_CHOLMOD=OFF \
+            -DG2O_USE_CSPARSE=ON \
+            -DG2O_USE_OPENGL=OFF \
+            -DG2O_USE_OPENMP=OFF \
+            -DG2O_BUILD_APPS=OFF \
+            -DG2O_BUILD_EXAMPLES=OFF
+          cmake --build build-g2o -j"$(sysctl -n hw.ncpu)"
+          cmake --install build-g2o
+
+      - name: build FBoW (stella-cv fork)
+        run: |
+          git clone https://github.com/stella-cv/FBoW.git src-fbow
+          git -C src-fbow checkout "$FBOW_REF"
+          # the fbow lib target links opencv_highgui but uses zero symbols from it
+          # (only utils/ needs GUI, BUILD_UTILS=OFF) — minimal OpenCV has no
+          # highgui backend, so drop the dead link line (same as the Linux job)
+          sed -i '' '/opencv_highgui/d' src-fbow/CMakeLists.txt
+          cmake -S src-fbow -B build-fbow \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DCMAKE_PREFIX_PATH="$OCV_PREFIX;$PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_UTILS=OFF
+          cmake --build build-fbow -j"$(sysctl -n hw.ncpu)"
+          cmake --install build-fbow
+
+      - name: build stella_vslam (Mac-parity commit)
+        run: |
+          git clone --recursive https://github.com/stella-cv/stella_vslam.git src-stella
+          git -C src-stella checkout "$STELLA_REF"
+          git -C src-stella submodule update --init --recursive
+          # spdlog + json vendored in 3rd/ (same as Linux). AppleClang has no
+          # native -fopenmp, so hand it libomp explicitly (as slam/build-mac.sh
+          # does). aruco off (minimal OpenCV has none anyway).
+          cmake -S src-stella -B build-stella \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+            -DCMAKE_PREFIX_PATH="$PREFIX;$OCV_PREFIX;/opt/homebrew" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DBUILD_WITH_MARCH_NATIVE=OFF \
+            -DUSE_ARUCO=OFF \
+            -DUSE_STACK_TRACE_LOGGER=OFF \
+            -DUSE_SSE_ORB=OFF \
+            -DUSE_SSE_FP_MATH=OFF \
+            -DUSE_SANITIZER=OFF \
+            -DOpenMP_C_FLAGS="-Xpreprocessor -fopenmp -I$LIBOMP/include" \
+            -DOpenMP_C_LIB_NAMES=omp \
+            -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I$LIBOMP/include" \
+            -DOpenMP_CXX_LIB_NAMES=omp \
+            -DOpenMP_omp_LIBRARY="$LIBOMP/lib/libomp.dylib"
+          cmake --build build-stella -j"$(sysctl -n hw.ncpu)"
+          cmake --install build-stella
+
+      - name: build slam_pipe
+        run: |
+          cmake -S slam -B build-slam-pipe \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_PREFIX_PATH="$PREFIX;$OCV_PREFIX;/opt/homebrew" \
+            -DOpenMP_C_FLAGS="-Xpreprocessor -fopenmp -I$LIBOMP/include" \
+            -DOpenMP_C_LIB_NAMES=omp \
+            -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I$LIBOMP/include" \
+            -DOpenMP_CXX_LIB_NAMES=omp \
+            -DOpenMP_omp_LIBRARY="$LIBOMP/lib/libomp.dylib"
+          cmake --build build-slam-pipe -j"$(sysctl -n hw.ncpu)"
+
+      - name: fetch ORB vocabulary
+        run: |
+          curl -fsSL -o orb_vocab.fbow \
+            "https://raw.githubusercontent.com/stella-cv/FBoW_orb_vocab/$VOCAB_REF/orb_vocab.fbow"
+          echo "$VOCAB_SHA256  orb_vocab.fbow" | shasum -a 256 -c -
+
+      - name: assemble bundle (relocate walker)
+        run: |
+          mkdir -p bundle/slam/lib
+          cp build-slam-pipe/slam_pipe bundle/slam/
+          cp slam/wltoys_slam.yaml bundle/slam/
+          cp orb_vocab.fbow bundle/slam/
+          # the same engine slam/package-mac.sh uses: copy every non-system dylib
+          # into lib/, rewrite install names to @rpath, one @loader_path/lib rpath
+          # on the exe, ad-hoc re-sign after each edit
+          # shellcheck source=slam/relocate.sh
+          source slam/relocate.sh
+          relocate_bundle bundle/slam/slam_pipe bundle/slam/lib "$PREFIX/lib" "$OCV_PREFIX/lib"
+          ls -la bundle/slam bundle/slam/lib
+
+      - name: smoke test (bundle must be self-contained)
+        run: |
+          # hide the build prefixes so nothing can resolve from them
+          mv "$PREFIX" "$PREFIX.hidden"
+          mv "$OCV_PREFIX" "$OCV_PREFIX.hidden"
+          cd bundle/slam
+          # no host path may appear in any load command (id line skipped)
+          if otool -L slam_pipe | tail -n +2 | grep -qE '/opt/homebrew|\.cache|/prefix'; then
+            echo '::error::host path leaked in slam_pipe'
+            otool -L slam_pipe
+            exit 1
+          fi
+          for so in lib/*.dylib; do
+            if otool -L "$so" | tail -n +2 | grep -qE '/opt/homebrew|\.cache|/prefix'; then
+              echo "::error::host path leaked in $so"; otool -L "$so"; exit 1
+            fi
+            codesign -v "$so" # every bundled dylib keeps a valid ad-hoc signature
+          done
+          codesign -v slam_pipe
+          # no-args run must reach main() and print usage + exit 2 — proves the
+          # loader mapped every lib from the bundle (constructors run before main)
+          set +e
+          out="$(env -i ./slam_pipe 2>&1)"
+          rc=$?
+          set -e
+          echo "exit=$rc"
+          echo "$out"
+          [ "$rc" -eq 2 ]
+          echo "$out" | grep -q 'usage:'
+          cd ../..
+          # restore the cached prefix so the cache post-step can save it
+          mv "$OCV_PREFIX.hidden" "$OCV_PREFIX"
+
+      - name: pack slam-macos-arm64.tar.xz
+        run: |
+          XZ_OPT='-9 -T0' tar -C bundle -cJf slam-macos-arm64.tar.xz slam
+          ls -la slam-macos-arm64.tar.xz
+          tar -tvJf slam-macos-arm64.tar.xz | head -40
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slam-macos-arm64
+          path: slam-macos-arm64.tar.xz
+          if-no-files-found: error
+
+      - name: summary
+        run: |
+          {
+            echo '## slam-macos-arm64.tar.xz'
+            echo
+            echo '```'
+            tar -tvJf slam-macos-arm64.tar.xz | head -60
+            echo '```'
+            echo
+            echo 'Attach to a release (install.sh/update.sh then pick it up):'
+            echo
+            echo '```'
+            echo 'gh run download ${{ github.run_id }} -n slam-macos-arm64'
+            echo 'gh release upload vX.Y.Z slam-macos-arm64.tar.xz'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

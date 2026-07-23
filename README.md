@@ -142,9 +142,46 @@ The caption under it shows the tracking state (`MAP TRACKING 25FPS` /
   `install.sh` / `update.sh` fetch and unpack it automatically when present.
   A release without the bundle simply leaves the minimap off; everything else
   works as normal.
+- **Mac install:** the arm64 equivalent is `slam-macos-arm64.tar.xz` (built by
+  the `slam-bundle-mac` GitHub Actions workflow, or locally with
+  `slam/package-mac.sh`) — fetched and unpacked the same way. It is fully
+  self-contained: `slam_pipe` plus every non-system dylib rides along in
+  `slam/lib/`, so it needs no Homebrew opencv/stella install to run.
 - Preview it on any machine without the car:
   `SLAM_DEMO_CLIP=recording.h265 ./run.sh --hud-demo` plays a recorded clip and
   maps it through the identical pipeline.
+
+### macOS SLAM bundle (`slam-macos-arm64.tar.xz`)
+
+The Mac SLAM sidecar ships as a portable, self-contained bundle — the Apple-
+Silicon analogue of the Deck's `$ORIGIN`-rpath Linux bundle. Two ways to build it:
+
+- **CI (lean, ~15-30 MB):** `.github/workflows/slam-bundle-mac.yml` on a `macos-14`
+  arm64 runner builds a **minimal OpenCV from source** (not brew opencv@4), plus
+  g2o / FBoW / stella at the same pinned commits as the Linux job, then relocates
+  everything with `slam/relocate.sh`. Dispatch from the Actions tab or push to the
+  `ci/slam-bundle-mac` branch; attach the artifact to a release by hand:
+  ```
+  gh run download <run-id> -n slam-macos-arm64
+  gh release upload vX.Y.Z slam-macos-arm64.tar.xz
+  ```
+- **Local, offline (guaranteed):** after a dev `slam/build-mac.sh`, run
+  ```
+  bash slam/package-mac.sh          # or: bash slam/package-mac.sh path/to/slam_pipe
+  ```
+  It stages `slam_pipe` + `wltoys_slam.yaml` + `orb_vocab.fbow`, relocates against
+  the dev prefixes, verifies no host path leaks, and writes
+  `slam/slam-macos-arm64.tar.xz`. This path packages the dev binary as-is, so it
+  bundles the full brew opencv@4 cascade (larger — ~55 MB); the CI job produces
+  the lean artifact.
+
+`slam/relocate.sh` is the shared engine both use: it recursively copies every
+non-system dylib into `slam/lib/`, rewrites all install names to
+`@rpath/<name>`, gives `slam_pipe` a single `@loader_path/lib` rpath, and
+re-signs ad-hoc (`codesign -s -`) after every edit — mandatory on Apple Silicon,
+where any `install_name_tool` change invalidates the signature and the loader
+then refuses to run the binary. It is sourceable (`relocate_bundle <exe> <libdir>
+[search dirs…]`) or runnable standalone, and is `/bin/bash` 3.2-safe.
 
 ## Updating
 
