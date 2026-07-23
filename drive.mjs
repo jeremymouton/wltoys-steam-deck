@@ -592,13 +592,17 @@ function startSlam(paced = false) { // paced: demo clips read at native rate (-r
   try { fs.unlinkSync(MAP_BGRA); } catch {} // stale raster from a previous run
   console.error(`[slam] ${SLAM_BIN}${existsSync(SLAM_MAP) ? ` (resuming map ${SLAM_MAP})` : ""}` +
     ` — View toggles minimap, RB toggles mapping mode`);
+  // detached: own process group, so a terminal Ctrl-C (delivered to the whole
+  // foreground group) can't kill the chain before the orderly EOF→save in
+  // stopSlam(). If drive.mjs dies hard anyway, the closing pipes still EOF
+  // through ffmpeg → slam_pipe, which saves the map and exits on its own.
   const ff = spawn("nice", ["-n", "10", ffBin, "-hide_banner", "-loglevel", "error",
     ...(paced ? ["-re"] : []),
     "-f", "hevc", "-i", "pipe:",
     "-f", "rawvideo", "-pix_fmt", "gray", "-s", "1280x720", "pipe:"],
-    { stdio: ["pipe", "pipe", "ignore"] });
+    { stdio: ["pipe", "pipe", "ignore"], detached: true });
   const sp = spawn("nice", ["-n", "10", SLAM_BIN, SLAM_CONFIG, SLAM_VOCAB, SLAM_MAP, SLAM_MAP],
-    { stdio: ["pipe", "pipe", process.env.SLAM_LOG ? "inherit" : "ignore"] });
+    { stdio: ["pipe", "pipe", process.env.SLAM_LOG ? "inherit" : "ignore"], detached: true });
   slam.ff = ff;
   slam.proc = sp;
   slam.active = true;
@@ -750,8 +754,11 @@ function startUdpVideo() {
 // feeds the SAME clip through the identical ffmpeg→slam_pipe chain the live tee
 // uses (paced at native rate), so the minimap renders end-to-end without the car.
 function hudDemo() {
-  const clip = process.env.SLAM_DEMO_CLIP || "";
-  if (clip && !existsSync(clip)) { console.error(`[hud-demo] SLAM_DEMO_CLIP not found: ${clip}`); process.exit(1); }
+  let clip = process.env.SLAM_DEMO_CLIP || "";
+  if (clip && !existsSync(clip)) { // degrade like every other SLAM path: demo runs, minimap off
+    console.error(`[hud-demo] SLAM_DEMO_CLIP not found: ${clip} — continuing demo without minimap`);
+    clip = "";
+  }
   const p = buildPlayer({ demo: true, clip });
   if (!p) { console.error("HUD demo needs mpv."); return; }
   console.error(`[hud-demo] ${p.cmd} ${p.args.join(" ")}`);
