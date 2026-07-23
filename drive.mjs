@@ -442,9 +442,14 @@ function findFfmpeg() {
 // NDJSON line -> map state. Lengths and finiteness are validated before any
 // value can steer a Buffer offset (sidecar output is data, not trusted input).
 const finiteArr = (a) => Array.isArray(a) && a.every((v) => Number.isFinite(v));
-const toXZ = (flat) => { // flat [x,y,z,...] -> [[x,z],...] (top-down: drop y)
+// flat [x,y,z,...] -> [[x,z],...] (top-down: drop y), stride-subsampled to
+// <= maxPairs. slam_pipe already caps its snapshots (2000 lms / 600 kfs);
+// these looser caps only bite when SLAM_BIN points at an older/other binary,
+// keeping retained memory + the 3 Hz raster cost bounded on hour-long maps.
+const toXZ = (flat, maxPairs) => {
+  const step = 3 * Math.max(1, Math.ceil(flat.length / 3 / maxPairs));
   const out = [];
-  for (let i = 0; i + 2 < flat.length; i += 3) out.push([flat[i], flat[i + 2]]);
+  for (let i = 0; i + 2 < flat.length; i += step) out.push([flat[i], flat[i + 2]]);
   return out;
 };
 function slamLine(line) {
@@ -462,8 +467,8 @@ function slamLine(line) {
     }
     slam.dirty = true;
   }
-  if (finiteArr(m.lms) && m.lms.length % 3 === 0) { slam.lms = toXZ(m.lms); slam.dirty = true; }
-  if (finiteArr(m.kfs) && m.kfs.length % 3 === 0) { slam.kfs = chainKfs(toXZ(m.kfs)); slam.dirty = true; }
+  if (finiteArr(m.lms) && m.lms.length % 3 === 0) { slam.lms = toXZ(m.lms, 4000); slam.dirty = true; }
+  if (finiteArr(m.kfs) && m.kfs.length % 3 === 0) { slam.kfs = chainKfs(toXZ(m.kfs, 1000)); slam.dirty = true; }
 }
 
 // stella returns keyframes in unordered_map (hash) order, not temporal order —
@@ -636,6 +641,9 @@ function startSlam(paced = false) { // paced: demo clips read at native rate (-r
       acc = acc.slice(i + 1);
       if (l) slamLine(l);
     }
+    // safety: a newline-less flood (misbehaving binary) must not grow the
+    // accumulator forever — drop it like any other torn line and resync.
+    if (acc.length > 4 * 1024 * 1024) acc = "";
   });
   slam.fpsTimer = setInterval(() => { slam.fps = slam.lines; slam.lines = 0; }, 1000);
   slam.rasterTimer = setInterval(() => { // 3 Hz, only when fresh data AND on screen
@@ -644,13 +652,14 @@ function startSlam(paced = false) { // paced: demo clips read at native rate (-r
   return true;
 }
 
-// Tee one complete HEVC frame into the decode leg. Never blocks: if ffmpeg's
-// stdin buffer is full (SLAM slower than the feed), frames are dropped until
-// drain — the decoder resyncs at the next keyframe.
+// Tee one complete HEVC frame (a stable Buffer — the caller's shared copy, NOT
+// a view into the reused rx buffer) into the decode leg. Never blocks: if
+// ffmpeg's stdin buffer is full (SLAM slower than the feed), frames are
+// dropped until drain — the decoder resyncs at the next keyframe.
 function slamFeed(f) {
   if (!slam.active || slam.dropping) return;
   try {
-    if (!slam.ff.stdin.write(Buffer.from(f))) {
+    if (!slam.ff.stdin.write(f)) {
       slam.dropping = true;
       slam.ff.stdin.once("drain", () => { slam.dropping = false; });
     }
@@ -719,13 +728,16 @@ function startUdpVideo() {
       emitted = true;
       const f = frame.subarray(0, total);
       if (!started) { if (hasKeyframe(f)) started = true; else return; }
-      try { player.stdin.write(Buffer.from(f)); } catch {}
+      // ONE stable copy off the reused rx buffer, shared by all three sinks
+      // (streams never mutate their buffers) — not a copy per sink.
+      const fc = Buffer.from(f);
+      try { player.stdin.write(fc); } catch {}
       hud.frames++; // one complete frame delivered to the player (fps source)
       if (recording) { // tee to the recording, started at a keyframe so it plays
         if (!recWriting && hasKeyframe(f)) recWriting = true;
-        if (recWriting) { try { recStream.write(Buffer.from(f)); } catch {} }
+        if (recWriting) { try { recStream.write(fc); } catch {} }
       }
-      slamFeed(f); // tee the same complete frame into the SLAM sidecar (no-op when inactive)
+      slamFeed(fc); // tee the same complete frame into the SLAM sidecar (no-op when inactive)
     }
   });
   rx.bind(CAM_VID_PORT, () => { sendCam(CAM_STOP); setTimeout(() => sendCam(CAM_START), 250); });

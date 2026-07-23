@@ -49,6 +49,13 @@ int main(int argc, char** argv) {
     constexpr int W = 1280, H = 720;
     constexpr double FPS = 25.0;
     constexpr uint64_t SNAPSHOT_EVERY = 25; // frames between lms/kfs dumps (1 Hz)
+    // Snapshot size caps — the consumer draws a 300x300 minimap, so past a few
+    // thousand points extra data is pure cost (map size grows unbounded over a
+    // long drive; uncapped, a 100k-landmark snapshot is a ~2MB NDJSON line that
+    // costs the Node side ~10ms/s to parse). Stride subsampling over the
+    // unordered_map iteration order is effectively a uniform random sample.
+    constexpr size_t LMS_CAP = 2000;
+    constexpr size_t KFS_CAP = 600; // Node chains kfs O(n^2); 600 keeps that ~2ms
 
     auto cfg  = std::make_shared<stella_vslam::config>(argv[1]);
     auto slam = std::make_shared<stella_vslam::system>(cfg, argv[2]);
@@ -100,10 +107,15 @@ int main(int argc, char** argv) {
             std::vector<std::shared_ptr<stella_vslam::data::landmark>> lms;
             std::set<std::shared_ptr<stella_vslam::data::landmark>> local_lms;
             mp->get_landmarks(lms, local_lms);
+            const size_t lm_stride = lms.size() > LMS_CAP ? (lms.size() + LMS_CAP - 1) / LMS_CAP : 1;
             std::printf(",\"lms\":[");
             bool first = true;
+            size_t li = 0;
             for (const auto& lm : lms) {
                 if (!lm || lm->will_be_erased()) {
+                    continue;
+                }
+                if (li++ % lm_stride) {
                     continue;
                 }
                 const auto p = lm->get_pos_in_world();
@@ -112,10 +124,15 @@ int main(int argc, char** argv) {
             }
             std::vector<std::shared_ptr<stella_vslam::data::keyframe>> kfs;
             mp->get_keyframes(kfs);
+            const size_t kf_stride = kfs.size() > KFS_CAP ? (kfs.size() + KFS_CAP - 1) / KFS_CAP : 1;
             std::printf("],\"kfs\":[");
             first = true;
+            size_t ki = 0;
             for (const auto& kf : kfs) {
                 if (!kf) {
+                    continue;
+                }
+                if (ki++ % kf_stride) {
                     continue;
                 }
                 const auto t = kf->get_trans_wc();
