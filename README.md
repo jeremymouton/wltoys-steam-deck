@@ -87,10 +87,21 @@ honestly but unsupported — no assets are built for it.
 | Y | start / stop recording |
 | View | show / hide the live minimap |
 | RB | mapping mode (throttle capped at 60%) |
+| **W / ↑** | forward (keyboard — no controller needed) |
+| **S / ↓** | reverse |
+| **A / ←**, **D / →** | steer left / right |
+| **Space** | neutral / stop |
 | exit game | stop |
 
 The minimap buttons only do something when the SLAM bundle is installed — see
 [Live minimap](#live-minimap-experimental).
+
+**Keyboard steering** (WASD / arrows) needs no controller — handy for driving and
+mapping from a Mac or the Deck's Desktop-Mode keyboard. It works while the **mpv
+video window has focus** (mpv gets true key press/release, so throttle can't latch
+on; releasing all keys returns to neutral within ~¼ s). Gamepad and keyboard can be
+used together — throttle takes whichever is higher, steering adds. It's active on
+the video/`--hud-demo` paths (mpv), not `--list`.
 
 ## Drive from a Mac (dev)
 

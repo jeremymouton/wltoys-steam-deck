@@ -198,6 +198,77 @@ const HUD_LUA = os.homedir() + "/.wltoys-hud.lua";
 const HUD_DATA = os.homedir() + "/.wltoys-hud.txt";
 const hud = { fps: 0, frames: 0, lastRx: 0, steer: 0, throttle: 0, recStart: 0, mode: VIDEO_MODE.toUpperCase() };
 
+// ---- keyboard steering (WASD + arrows) via mpv Lua FIFO heartbeat -----------
+// mpv holds window focus and its Lua gets REAL key down/up (a raw terminal only
+// gets down + OS auto-repeat, never up — the exact latch this project already
+// hit). So keyboard driving is routed through the HUD Lua: complex key bindings
+// keep a held-key SET, and a 20 Hz timer writes the FULL current set each tick to
+// this FIFO as a line ("KEYS w d\n", or "KEYS -" when empty). Node recomputes
+// kbState FRESH per line — an idempotent heartbeat, so a dropped line can't
+// desync — and merges it READ-ONLY into currentPacket(). The keyboard NEVER
+// writes the shared axes[]/buttons[] arrays: the exact regression guard for the
+// logged throttle-latch bug (execution-log 2026-07-21).
+const KEY_FIFO = os.homedir() + "/.wltoys-keys"; // beside HUD_DATA / HUD_LUA
+const KB_FAILSAFE_MS = 250; // no heartbeat within this window -> force neutral
+const kbState = { steer: 0, fwd: false, rev: false };
+let kbLastKeys = 0; // ms of the last KEYS heartbeat (0 = none yet -> inactive)
+let kbStream = null;
+
+// Parse one held-key heartbeat line into kbState, recomputed fresh each call.
+// Module-level so --selftest can drive it directly with synthetic FIFO lines.
+function handleKeyLine(ln) {
+  if (!ln.startsWith("KEYS ")) return;
+  kbLastKeys = Date.now();
+  const h = new Set(ln.slice(5).trim().split(/\s+/));
+  if (h.has("SPACE")) { kbState.steer = 0; kbState.fwd = false; kbState.rev = false; return; } // stop overrides all
+  kbState.fwd = h.has("w") || h.has("UP");
+  kbState.rev = h.has("s") || h.has("DOWN");
+  kbState.steer = (h.has("d") || h.has("RIGHT") ? 1 : 0) - (h.has("a") || h.has("LEFT") ? 1 : 0);
+}
+
+// kbState with the failsafe applied — neutral if no heartbeat within the window
+// (mpv/pipe dead). Read-only: never mutates kbState, so a resumed heartbeat is
+// picked up on the very next tick. Never latches throttle on.
+function kbLive() {
+  if (Date.now() - kbLastKeys > KB_FAILSAFE_MS) return { steer: 0, fwd: false, rev: false };
+  return kbState;
+}
+
+// Create the Lua->Node FIFO and start reading heartbeats. Called from the mpv
+// branch of buildPlayer BEFORE mpv spawns, so Node's read end (flags:"r+" =
+// O_RDWR: never blocks, never EOFs even across an mpv restart) is open before the
+// Lua opens the write end. Idempotent; clears any stale FIFO first.
+function startKeyboard() {
+  if (kbStream) return;
+  try { fs.unlinkSync(KEY_FIFO); } catch { /* no stale FIFO */ }
+  if (spawnSync("mkfifo", [KEY_FIFO]).status !== 0) {
+    console.error("[keys] mkfifo failed — keyboard steering unavailable (gamepad + video still work)");
+    return;
+  }
+  try {
+    kbStream = fs.createReadStream(KEY_FIFO, { flags: "r+" });
+  } catch (e) {
+    console.error(`[keys] FIFO open failed: ${e.message} — keyboard steering unavailable`);
+    kbStream = null;
+    return;
+  }
+  let buf = "";
+  kbStream.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) { handleKeyLine(buf.slice(0, i)); buf = buf.slice(i + 1); }
+    if (buf.length > 4096) buf = ""; // a newline-less flood can't grow the buffer forever
+  });
+  kbStream.on("error", (e) => console.error(`[keys] FIFO read error: ${e.message}`));
+  console.error("[keys] keyboard steering ready — W/↑ fwd, S/↓ rev, A/← D/→ steer, SPACE = stop");
+}
+
+// Stop reading and remove the FIFO (called from shutdown alongside the failsafe).
+function stopKeyboard() {
+  if (kbStream) { try { kbStream.close(); } catch { /* noop */ } kbStream = null; }
+  try { fs.unlinkSync(KEY_FIFO); } catch { /* already gone */ }
+}
+
 function writeHudLua() {
   // Dev aid (HUD_SHOTS=<dir>/<prefix>): timed WINDOW screenshots — video + ASS
   // HUD + bitmap overlays — used by the Mac minimap verification runs.
@@ -208,6 +279,30 @@ for _, t in ipairs({10, 20, 30}) do
   end)
 end
 ` : "";
+  // Keyboard steering: complex (real down/up) FORCED bindings — forced so SPACE
+  // overrides mpv's default pause. A held-key SET updates on down/repeat/up; a
+  // 20 Hz timer writes the FULL set each tick to the FIFO Node already opened for
+  // reading (so this io.open("w") never blocks). Idempotent heartbeat.
+  const keys = `
+local keyfifo = io.open("${KEY_FIFO}", "w")
+if keyfifo then
+  keyfifo:setvbuf("no")
+  local held = {}
+  local function kbind(k)
+    mp.add_forced_key_binding(k, "wlk_" .. k, function(e)
+      if e.event == "up" then held[k] = nil
+      elseif e.event ~= "press" then held[k] = true end
+    end, {complex = true})
+  end
+  for _, k in ipairs({"w", "a", "s", "d", "UP", "DOWN", "LEFT", "RIGHT", "SPACE"}) do kbind(k) end
+  mp.add_periodic_timer(0.05, function()
+    local ks = {}
+    for k, _ in pairs(held) do ks[#ks + 1] = k end
+    keyfifo:write("KEYS " .. (ks[1] and table.concat(ks, " ") or "-") .. "\\n")
+    keyfifo:flush()
+  end)
+end
+`;
   const lua = `
 local utils = require("mp.utils")
 local datafile = "${HUD_DATA}"
@@ -242,7 +337,7 @@ mp.add_periodic_timer(0.25, function()
     mp.command_native({name = "overlay-remove", id = 1})
   end
 end)
-${shots}`;
+${shots}${keys}`;
   try { fs.writeFileSync(HUD_LUA, lua); return true; } catch { return false; }
 }
 
@@ -347,6 +442,8 @@ function buildPlayer(src) {
   if (has("mpv") || flatpakMpv) {
     const pre = has("mpv") ? ["mpv"] : ["flatpak", "run", "io.mpv.Mpv"];
     const hudArgs = writeHudLua() ? [`--script=${HUD_LUA}`] : [];
+    if (hudArgs.length) startKeyboard(); // FIFO + reader up BEFORE mpv's Lua opens the write end
+
     const tail = src.demo ? ["--no-untimed", "--loop=inf", "--no-fullscreen", "--geometry=1280x800",
         ...(src.clip ? ["--demuxer=lavf", "--demuxer-lavf-format=hevc", src.clip]
                      : ["av://lavfi:testsrc2=size=1280x720:rate=30"])]
@@ -836,7 +933,7 @@ function hudDemo() {
     } else console.error("[hud-demo] SLAM_DEMO_CLIP set but the slam chain is unavailable");
   }
   const player = spawn(p.cmd, p.args, { stdio: "inherit" });
-  const bye = () => { clearInterval(timer); stopSlam(() => process.exit(0)); };
+  const bye = () => { clearInterval(timer); stopKeyboard(); stopSlam(() => process.exit(0)); };
   player.on("exit", bye);
   process.on("SIGINT", bye);
 }
@@ -856,17 +953,26 @@ function triggerAmount(idx) {
 }
 
 function currentPacket() {
-  if (!connected) { hud.steer = 0; hud.throttle = 0; return neutral(); } // gamepad gone -> stop
-  const steerNorm = expo(deadzone(axes[STEER_AXIS] || 0), STEER_EXPO);
+  // Keyboard channel (mpv Lua FIFO): read-only, recomputed live, failsafe-neutral
+  // when no recent heartbeat. Merged with the gamepad HERE — never written into
+  // the shared axes[]/buttons[] (the throttle-latch regression guard).
+  const kb = kbLive();
+  const kbActive = kb.fwd || kb.rev || kb.steer !== 0; // any live keyboard input this tick
+  // Gamepad gone AND no live keyboard -> stop. Keyboard is its OWN liveness source,
+  // so keyboard-only driving (no controller at all) still produces real packets.
+  if (!connected && !kbActive) { hud.steer = 0; hud.throttle = 0; return neutral(); }
+  // steer = gamepad axis + keyboard, additively clamped, then the shared deadzone/expo.
+  const steerNorm = expo(deadzone(Math.max(-1, Math.min(1, (axes[STEER_AXIS] || 0) + kb.steer))), STEER_EXPO);
 
   let net; // throttle in -1..1 (+ forward, - reverse)
   if (THROTTLE_MODE === "trigger") {
-    // forward = right trigger OR A button; reverse = left trigger OR B button.
-    const forward = Math.max(triggerAmount(RT_AXIS), buttons[ACCEL_BUTTON] ? 1 : 0);
-    const reverse = Math.max(triggerAmount(LT_AXIS), buttons[REVERSE_BUTTON] ? 1 : 0);
+    // forward = right trigger OR A button OR keyboard (W/↑); reverse = LT OR B OR keyboard (S/↓)
+    const forward = Math.max(triggerAmount(RT_AXIS), buttons[ACCEL_BUTTON] ? 1 : 0, kb.fwd ? 1 : 0);
+    const reverse = Math.max(triggerAmount(LT_AXIS), buttons[REVERSE_BUTTON] ? 1 : 0, kb.rev ? 1 : 0);
     net = forward - reverse;
   } else {
-    net = -deadzone(axes[THROTTLE_AXIS] || 0); // stick up = forward
+    net = -deadzone(axes[THROTTLE_AXIS] || 0) + (kb.fwd ? 1 : 0) - (kb.rev ? 1 : 0); // stick up = forward, + keyboard
+    net = Math.max(-1, Math.min(1, net));
   }
   net = expo(net, THROTTLE_EXPO);
   if (mappingMode) net = Math.max(-MAPPING_CAP, Math.min(MAPPING_CAP, net)); // slow lap for clean SLAM
@@ -919,6 +1025,36 @@ function selftest() {
   feedJoyBytes(ev(0, 0x01, MAPPING_BUTTON));
   feedJoyBytes(ev(1, 0x01, MAPPING_BUTTON));
   check("RB again restores full throttle", mappingMode === false && currentPacket()[10] === 255);
+
+  // ---- keyboard steering (T2): mpv Lua FIFO heartbeat -> kbState -> packet ----
+  // Feed synthetic "KEYS ..." lines through the real parser (handleKeyLine) — the
+  // exact path the mpv Lua's 20 Hz heartbeat takes — and assert the packet bytes.
+  // First neutralize the gamepad so the keyboard is the ONLY throttle/steer source.
+  buttons[ACCEL_BUTTON] = 0; buttons[REVERSE_BUTTON] = 0; axes[STEER_AXIS] = 0; mappingMode = false;
+  handleKeyLine("KEYS w"); // hold W -> full forward
+  check("KEYS w = forward throttle (>128)", currentPacket()[10] > NEUTRAL);
+  check("KEYS w = full-forward byte 255 (like RB/A path)", currentPacket()[10] === 255);
+  handleKeyLine("KEYS d"); // fresh set: W dropped, D held -> steer right, throttle back to neutral
+  check("KEYS d = steer right (>128)", currentPacket()[9] > NEUTRAL);
+  check("KEYS d releases throttle (recomputed live, not latched)", currentPacket()[10] === NEUTRAL);
+  handleKeyLine("KEYS w d"); // hold W and D -> forward AND steer
+  check("KEYS w d = forward AND steer", currentPacket()[10] === 255 && currentPacket()[9] > NEUTRAL);
+  handleKeyLine("KEYS -"); // release everything -> NEUTRAL (the latch regression guard)
+  check("KEYS - (release) -> throttle NEUTRAL 0x80", currentPacket()[10] === NEUTRAL);
+  check("KEYS - (release) -> steer centered 0x80", currentPacket()[9] === NEUTRAL);
+  handleKeyLine("KEYS s"); // reverse
+  check("KEYS s = reverse throttle (<128)", currentPacket()[10] < NEUTRAL);
+  handleKeyLine("KEYS UP"); // arrow up = forward (alias of W)
+  check("KEYS UP (arrow) = forward 255", currentPacket()[10] === 255);
+  handleKeyLine("KEYS LEFT"); // arrow left = steer left (alias of A)
+  check("KEYS LEFT (arrow) = steer left (<128)", currentPacket()[9] < NEUTRAL);
+  handleKeyLine("KEYS w SPACE"); // SPACE stop overrides even a held W
+  check("KEYS SPACE = neutral (stop overrides held keys)", currentPacket()[10] === NEUTRAL);
+  handleKeyLine("KEYS w"); // hold forward again, then simulate a dead pipe (stale heartbeat)
+  kbLastKeys = Date.now() - (KB_FAILSAFE_MS + 50); // no heartbeat within the window -> failsafe
+  check("stale heartbeat > failsafe window -> neutral (never latch)", currentPacket()[10] === NEUTRAL);
+  kbLastKeys = 0; // leave the keyboard inactive for the remaining checks
+
   const pkt = currentPacket();
   check("checksum byte14 = b9^b10^b11", pkt[14] === (pkt[9] ^ pkt[10] ^ pkt[11]));
   process.exit(ok ? 0 : 1);
@@ -970,6 +1106,7 @@ if (process.argv.includes("--list")) {
     clearInterval(fpsTimer);
     clearInterval(hudTimer);
     stopRecord(); // flush + close any recording
+    stopKeyboard(); // close the FIFO reader + remove ~/.wltoys-keys
     for (let i = 0; i < 6; i++) sock.send(neutral(), CTRL_PORT, CAR_IP); // failsafe
     if (video && video._camStop) video._camStop(); // stop the UDP camera stream
     if (video) try { video.kill(); } catch {}
