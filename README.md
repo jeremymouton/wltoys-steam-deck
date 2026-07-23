@@ -77,6 +77,11 @@ The caption under it shows the tracking state (`MAP TRACKING 25FPS` /
 - SLAM runs as a separate low-priority process — if it crashes the minimap
   disappears and driving is unaffected. No scale/north: the map is relative to
   where mapping started.
+- **Deck install:** the prebuilt SLAM bundle (`slam-linux-x64.tar.xz`, built by
+  the `slam-bundle` GitHub Actions workflow) ships as a release asset —
+  `install.sh` / `update.sh` fetch and unpack it automatically when present.
+  A release without the bundle simply leaves the minimap off; everything else
+  works as normal.
 - Preview it on any machine without the car:
   `SLAM_DEMO_CLIP=recording.h265 ./run.sh --hud-demo` plays a recorded clip and
   maps it through the identical pipeline.
