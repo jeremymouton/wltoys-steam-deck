@@ -18,6 +18,11 @@ node_modules/
 
 # slam local build output
 slam/build/
+# gamepad helper build output (macOS, compiled by gamepad/build-mac.sh)
+gamepad/gamepad_mac
+# slam mac portable bundle: staging dir + produced release asset (package-mac.sh)
+slam/dist/
+slam-macos-arm64.tar.xz
 # claude-autodev workflow state
 .autodev/
 # reconstruct.sh work/output dirs

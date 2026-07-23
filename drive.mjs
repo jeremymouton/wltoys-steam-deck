@@ -141,7 +141,37 @@ function feedJoyBytes(chunk, listMode = false) {
     }
   }
 }
+// macOS has no joydev device. A tiny Swift GameController helper (gamepad/) emits
+// the SAME 8-byte joydev event format on stdout, so feedJoyBytes below stays
+// byte-for-byte unchanged. Resolve the helper like SLAM_BIN: GAMEPAD_BIN env
+// override, else the dev build (gamepad/gamepad_mac), else the packaged bundle's
+// gamepad-helper beside drive.mjs (see GAMEPAD_BIN, defined near SLAM_BIN).
+function openGamepadMac(listMode = false) {
+  if (!GAMEPAD_BIN) {
+    console.error("[gamepad] no macOS controller helper found — build it with: bash gamepad/build-mac.sh");
+    console.error("[gamepad] continuing without a controller (keyboard steering, video and mapping still work).");
+    return; // never crash: driving-by-keyboard + video + SLAM run regardless of a pad
+  }
+  console.error(`[gamepad] spawning ${GAMEPAD_BIN}`);
+  let helper;
+  try {
+    helper = spawn(GAMEPAD_BIN, [], { stdio: ["ignore", "pipe", "inherit"] });
+  } catch (e) {
+    console.error(`[gamepad] helper failed to start: ${e.message} — no controller input`);
+    return;
+  }
+  // The helper stays silent until a controller connects; its first bytes are the
+  // init burst. Mirror the joydev "open" semantics — mark connected once events
+  // flow, so with no pad `connected` stays false and currentPacket() sends neutral.
+  helper.stdout.on("data", (chunk) => { connected = true; feedJoyBytes(chunk, listMode); });
+  helper.on("error", (e) => { connected = false; console.error(`[gamepad] helper error: ${e.message} — failsafe to neutral`); });
+  helper.on("exit", () => { connected = false; });
+  process.once("exit", () => { try { helper.kill(); } catch { /* noop */ } });
+}
+
 function openGamepad(listMode = false) {
+  if (process.platform === "darwin") return openGamepadMac(listMode);
+  // ---- Linux / Steam Deck: read the joydev device directly (UNCHANGED) ----
   if (!existsSync(JS)) {
     console.error(`No gamepad at ${JS}. Check: ls /dev/input/js*  (try JS_DEVICE=/dev/input/js1)`);
     if (!listMode) process.exit(1);
@@ -411,6 +441,10 @@ const SLAM_CONFIG = process.env.SLAM_CONFIG ||
   [SLAM_DIR + "wltoys_slam.yaml", APP_DIR + "slam/wltoys_slam.yaml"].find((p) => existsSync(p)) || "";
 const SLAM_MAP = process.env.SLAM_MAP || os.homedir() + "/wltoys-runtime/map.msg"; // persisted across sessions
 const SLAM_OK = Boolean(SLAM_BIN && SLAM_VOCAB && SLAM_CONFIG);
+// macOS gamepad helper (built by gamepad/build-mac.sh). Resolved like SLAM_BIN:
+// env override → dev build → packaged bundle. Empty on Linux / when unbuilt.
+const GAMEPAD_BIN = process.env.GAMEPAD_BIN ||
+  [APP_DIR + "gamepad/gamepad_mac", APP_DIR + "gamepad-helper"].find((p) => existsSync(p)) || "";
 // The BGRA file lives on tmpfs when possible; picked ONCE here and baked into
 // the generated Lua so both sides agree. macOS (dev) has no /dev/shm — the
 // $HOME fallback covers it, same trust model as the other ~/.wltoys-* files.
@@ -857,6 +891,16 @@ function selftest() {
   let ok = true;
   const check = (name, cond) => { console.log(`${cond ? "ok" : "FAIL"} - ${name}`); ok &&= cond; };
   connected = true;
+  // macOS trigger seeding: the Swift helper's init burst records rest=0 for a
+  // trigger (which rests at 0 on macOS, not -1). feedJoyBytes must then read a
+  // resting trigger as NEUTRAL throttle — never half throttle (the exact macOS
+  // bug the init burst prevents). Exercised here through the real parse+packet path.
+  feedJoyBytes(ev(0, 0x82, RT_AXIS)); // init burst: seed trigger rest = 0
+  feedJoyBytes(ev(0, 0x02, RT_AXIS)); // trigger released
+  check("macOS trigger at rest = neutral throttle", currentPacket()[10] === NEUTRAL);
+  feedJoyBytes(ev(32767, 0x02, RT_AXIS)); // trigger fully pressed → forward
+  check("macOS trigger full press = forward 255", currentPacket()[10] === 255);
+  feedJoyBytes(ev(0, 0x02, RT_AXIS)); // release again for the button-based checks below
   const v0 = mapVisible;
   feedJoyBytes(ev(1, 0x01, MINIMAP_BUTTON));
   check("View press toggles minimap", mapVisible === !v0);
