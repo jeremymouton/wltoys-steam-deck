@@ -933,7 +933,15 @@ function hudDemo() {
     } else console.error("[hud-demo] SLAM_DEMO_CLIP set but the slam chain is unavailable");
   }
   const player = spawn(p.cmd, p.args, { stdio: "inherit" });
-  const bye = () => { clearInterval(timer); stopKeyboard(); stopSlam(() => process.exit(0)); };
+  let byeCalled = false;
+  const bye = () => {
+    if (byeCalled) return; // player.exit + SIGINT can both fire
+    byeCalled = true;
+    clearInterval(timer);
+    stopKeyboard();
+    try { if (player.exitCode === null) player.kill(); } catch {} // don't orphan the mpv window on Ctrl-C
+    stopSlam(() => process.exit(0));
+  };
   player.on("exit", bye);
   process.on("SIGINT", bye);
 }
