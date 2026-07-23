@@ -31,7 +31,15 @@ import Foundation
 
 let out = FileHandle.standardOutput
 
-// Write one 8-byte joydev record. `value` is clamped to the Int16 range and
+// Encode 8-byte joydev records into a reusable frame buffer, then flush the whole
+// frame in ONE write. A GCExtendedGamepad value-change fires all 14 mapped
+// elements at once (6 axes + 8 buttons); emitting them per-record meant 14
+// write() syscalls per frame at the pad's ~60-125 Hz poll rate. Coalescing to one
+// write per frame cuts that ~14x AND hands drive.mjs a clean 8-byte-aligned chunk
+// (so its parser skips the concat/subarray path). Same bytes, same order.
+var frame = Data()
+
+// Append one 8-byte joydev record. `value` is clamped to the Int16 range and
 // stored little-endian at bytes 4-5.
 func emit(_ value: Int, _ type: UInt8, _ number: UInt8) {
     var b = [UInt8](repeating: 0, count: 8)
@@ -41,7 +49,15 @@ func emit(_ value: Int, _ type: UInt8, _ number: UInt8) {
     b[5] = UInt8(uv >> 8)
     b[6] = type
     b[7] = number
-    try? out.write(contentsOf: Data(b))
+    frame.append(contentsOf: b)
+}
+
+// Write the accumulated frame in one syscall, then reset (keeping capacity so no
+// reallocation per frame).
+func flush() {
+    if frame.isEmpty { return }
+    try? out.write(contentsOf: frame)
+    frame.removeAll(keepingCapacity: true)
 }
 
 // Axis: scale the element's native float (sticks -1..1, triggers 0..1) to Int16.
@@ -85,12 +101,14 @@ func attach(_ g: GCExtendedGamepad) {
     // button is emitted released.
     axisFrame(g, initial: true)
     for n: UInt8 in 0...7 { bt(false, n, initial: true) }
+    flush() // one write for the whole init burst
 
     // Live updates — event-driven (fires on state change, lower latency than
-    // polling and ample for drive.mjs's 50 Hz sampling loop).
+    // polling and ample for drive.mjs's 50 Hz sampling loop). One write per frame.
     g.valueChangedHandler = { gp, _ in
         axisFrame(gp, initial: false)
         buttonFrame(gp)
+        flush()
     }
 }
 
@@ -117,6 +135,7 @@ center.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .mai
     // Emit a neutral frame — all mapped axes to rest 0, all buttons released.
     for n: UInt8 in [0, 1, 2, 5, 6, 7] { ax(0, n) }
     for n: UInt8 in 0...7 { bt(false, n) }
+    flush() // one write for the neutral safety frame
 }
 
 // Register the connect observer BEFORE the run loop, then also attach any pad

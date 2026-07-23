@@ -106,14 +106,21 @@ let lastTrimDir = 0; // for edge-triggering one trim step per D-pad press
 // Joydev byte-stream parser, module-level so --selftest can feed it synthetic
 // events. Tolerates chunks that split mid-event (kernel delivers 8-byte records
 // but the read stream may slice them anywhere).
-let joyBuf = Buffer.alloc(0);
+const EMPTY_BUF = Buffer.alloc(0);
+let joyBuf = EMPTY_BUF;
 function feedJoyBytes(chunk, listMode = false) {
-  joyBuf = Buffer.concat([joyBuf, chunk]);
-  while (joyBuf.length >= 8) {
-    const value = joyBuf.readInt16LE(4);
-    const type = joyBuf.readUInt8(6);
-    const number = joyBuf.readUInt8(7);
-    joyBuf = joyBuf.subarray(8);
+  // Parse in place with an offset. Only concat when a previous chunk left a
+  // partial (<8B) event; the common case (8-byte-aligned chunks — the Mac helper
+  // now writes one aligned 112B frame) then skips the concat AND avoids a fresh
+  // subarray Buffer per event — ~8x less work, zero per-event Buffer churn in
+  // this hot path (see docs/logs/optimization-results.md).
+  const data = joyBuf.length ? Buffer.concat([joyBuf, chunk]) : chunk;
+  let off = 0;
+  while (data.length - off >= 8) {
+    const value = data.readInt16LE(off + 4);
+    const type = data.readUInt8(off + 6);
+    const number = data.readUInt8(off + 7);
+    off += 8;
     const isAxis = (type & 0x02) !== 0;
     const isInit = (type & 0x80) !== 0; // synthetic event fired on open — ignore for --list
     if (isAxis) {
@@ -140,6 +147,9 @@ function feedJoyBytes(chunk, listMode = false) {
       console.log(isAxis ? `axis ${number} = ${(value / 32767).toFixed(2)}` : `button ${number} = ${value}`);
     }
   }
+  // Carry any trailing partial event (0-7B). Copy it out so we never retain the
+  // whole chunk buffer; reuse the shared empty when the chunk was fully consumed.
+  joyBuf = off < data.length ? Buffer.from(data.subarray(off)) : EMPTY_BUF;
 }
 // macOS has no joydev device. A tiny Swift GameController helper (gamepad/) emits
 // the SAME 8-byte joydev event format on stdout, so feedJoyBytes below stays
@@ -228,9 +238,12 @@ function handleKeyLine(ln) {
 
 // kbState with the failsafe applied — neutral if no heartbeat within the window
 // (mpv/pipe dead). Read-only: never mutates kbState, so a resumed heartbeat is
-// picked up on the very next tick. Never latches throttle on.
+// picked up on the very next tick. Never latches throttle on. The stale branch
+// returns a shared frozen neutral (read-only) so the 50 Hz packet loop makes no
+// per-tick allocation when the keyboard is idle (the gamepad/no-input default).
+const KB_NEUTRAL = Object.freeze({ steer: 0, fwd: false, rev: false });
 function kbLive() {
-  if (Date.now() - kbLastKeys > KB_FAILSAFE_MS) return { steer: 0, fwd: false, rev: false };
+  if (Date.now() - kbLastKeys > KB_FAILSAFE_MS) return KB_NEUTRAL;
   return kbState;
 }
 
