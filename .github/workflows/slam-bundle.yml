@@ -210,8 +210,8 @@ jobs:
             case "$name" in
               libc.so.*|libm.so.*|libdl.so.*|libpthread.so.*|librt.so.*|libresolv.so.*) continue ;;
             esac
-            case "$path" in
-              "$PWD"/lib/*) ;;
+            case "$path" in # $ORIGIN of ./slam_pipe yields a "/./" segment
+              "$PWD"/lib/*|"$PWD"/./lib/*) ;;
               *) echo "::error::$name resolved outside the bundle: $path"; bad=1 ;;
             esac
           done < <(ldd ./slam_pipe | awk '$2 == "=>" {print $1, $3}')
