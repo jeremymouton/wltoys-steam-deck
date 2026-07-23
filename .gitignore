@@ -18,3 +18,7 @@ node_modules/
 
 # slam local build output
 slam/build/
+# claude-autodev workflow state
+.autodev/
+# reconstruct.sh work/output dirs
+reconstruct-*/
