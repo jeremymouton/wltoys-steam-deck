@@ -43,9 +43,13 @@ jobs:
       - name: apt build deps
         run: |
           sudo apt-get update
+          # GL dev packages: g2o's installed g2oConfig.cmake does an
+          # unconditional find_dependency(OpenGL) even with G2O_USE_OPENGL=OFF;
+          # build-time only, nothing links GL (the smoke test proves it)
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake git ca-certificates curl xz-utils patchelf \
-            libeigen3-dev libyaml-cpp-dev libsqlite3-dev libsuitesparse-dev
+            libeigen3-dev libyaml-cpp-dev libsqlite3-dev libsuitesparse-dev \
+            libgl-dev libglx-dev libopengl-dev
           # stella needs Eigen >= 3.3; jammy ships 3.4.0
           dpkg -s libeigen3-dev | grep '^Version'
 
