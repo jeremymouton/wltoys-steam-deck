@@ -249,6 +249,26 @@ jobs:
           path: slam-macos-arm64.tar.xz
           if-no-files-found: error
 
+      # The macOS gamepad helper (Swift/GameController) is a trivial swiftc build
+      # with no SLAM deps — build + ship it from the same arm64 runner so the
+      # release carries all Mac assets. install.sh/update.sh fetch it as
+      # gamepad-helper-macos-arm64; absent = keyboard steering (WASD) only.
+      - name: build gamepad helper
+        run: |
+          bash gamepad/build-mac.sh
+          file gamepad/gamepad_mac
+          # prove the linker-embedded Info.plist (CFBundleIdentifier) is present —
+          # without it GCController.controllers() is empty at runtime
+          otool -s __TEXT __info_plist gamepad/gamepad_mac | grep -q . \
+            && echo "info_plist section present"
+          cp gamepad/gamepad_mac gamepad-helper-macos-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gamepad-helper-macos-arm64
+          path: gamepad-helper-macos-arm64
+          if-no-files-found: error
+
       - name: summary
         run: |
           {
@@ -258,10 +278,10 @@ jobs:
             tar -tvJf slam-macos-arm64.tar.xz | head -60
             echo '```'
             echo
-            echo 'Attach to a release (install.sh/update.sh then pick it up):'
+            echo 'Attach both Mac assets to a release (install.sh/update.sh pick them up):'
             echo
             echo '```'
-            echo 'gh run download ${{ github.run_id }} -n slam-macos-arm64'
-            echo 'gh release upload vX.Y.Z slam-macos-arm64.tar.xz'
+            echo 'gh run download ${{ github.run_id }} -n slam-macos-arm64 -n gamepad-helper-macos-arm64'
+            echo 'gh release upload vX.Y.Z slam-macos-arm64.tar.xz gamepad-helper-macos-arm64 --clobber'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
