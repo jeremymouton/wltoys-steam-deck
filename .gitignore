@@ -22,3 +22,7 @@ slam/build/
 .autodev/
 # reconstruct.sh work/output dirs
 reconstruct-*/
+# stray tool artifacts
+debug.txt
+target/
+.playwright-cli/
