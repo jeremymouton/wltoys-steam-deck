@@ -1,0 +1,50 @@
+# WLtoys 6401 onboard camera — stella_vslam config for slam_pipe.
+#
+# Intrinsics calibrated by COLMAP from real driving footage
+# (sparse/1, 126 frames, 0.997 px reprojection error) — HFOV ~91deg,
+# NOT the 120deg printed on the box. SIMPLE_RADIAL k maps to OpenCV k1.
+#
+# slam_pipe feeds raw gray8 frames, hence color_order Gray.
+# Note: stella 0.6 has no Feature.max_num_keypoints key —
+# Preprocessing.min_size is the keypoint-count knob.
+
+Camera:
+  name: "wltoys 6401 fpv"
+  setup: "monocular"
+  model: "perspective"
+
+  fx: 628.33
+  fy: 628.33
+  cx: 640.0
+  cy: 360.0
+
+  k1: -0.1139
+  k2: 0.0
+  p1: 0.0
+  p2: 0.0
+  k3: 0.0
+
+  fps: 25.0
+  cols: 1280
+  rows: 720
+
+  color_order: "Gray"
+
+Preprocessing:
+  min_size: 800
+
+Feature:
+  name: "wltoys tuned ORB"
+  scale_factor: 1.2
+  num_levels: 8
+  ini_fast_threshold: 12
+  min_fast_threshold: 3
+
+Tracking:
+  # Disable stella's reset-the-map-on-loss-within-5s default: with 0.0 the
+  # "tracking lost within N sec after initialization" reset can never fire,
+  # so the map survives every tracking loss (R1.4).
+  init_retry_threshold_time: 0.0
+  # BoW relocalization against the persistent map after each loss (default,
+  # pinned here because the loss-tolerant design depends on it).
+  enable_auto_relocalization: true

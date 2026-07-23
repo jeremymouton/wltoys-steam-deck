@@ -15,3 +15,6 @@ __pycache__/
 # node / os
 node_modules/
 .DS_Store
+
+# slam local build output
+slam/build/
