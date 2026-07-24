@@ -152,6 +152,7 @@ jobs:
           cmake -S src-stella -B build-stella \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_PREFIX="$PREFIX" \
             -DCMAKE_PREFIX_PATH="$PREFIX;$OCV_PREFIX;/opt/homebrew" \
             -DBUILD_SHARED_LIBS=ON \
@@ -176,6 +177,7 @@ jobs:
           cmake -S slam -B build-slam-pipe \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_PREFIX_PATH="$PREFIX;$OCV_PREFIX;/opt/homebrew" \
             -DOpenMP_C_FLAGS="-Xpreprocessor -fopenmp -I$LIBOMP/include" \
             -DOpenMP_C_LIB_NAMES=omp \
